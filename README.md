@@ -1,206 +1,184 @@
-![Image of REDACTED STAMP](https://raw.githubusercontent.com/freelawproject/x-ray/main/redacted.png)
+# x-ray: PDF Redaction Failure Analyzer
 
-x-ray is a Python library for finding bad redactions in PDF documents.
+`x-ray` is a security analysis tool for detecting ineffective
+redactions in PDF files. It identifies cases where text is still recoverable
+even though a rectangle appears to hide it visually.
 
-## Why?
+This repository is intended for ethical use by security research teams.
 
-At Free Law Project, we collect millions of PDFs. An ongoing problem
-is that people fail to properly redact things. Instead of doing it the right
-way, they just draw a black rectangle or a black highlight on top of black
-text and call it a day. Well, when that happens you just select the text under
-the rectangle, and you can read it again. Not great.
+## Authorized Use
 
-After witnessing this problem for years (our favorite is the doc that shared 
-Taylor Swift's personal phone number), we decided it would be good to do
-something about it. 
+Use this tool only on documents you are explicitly authorized to assess.
 
-This tool is our answer. You give the tool the path to a PDF. It tells you if 
-it has worthless redactions in it and whether to call Taylor (don't).
+- Internal assessments and QA workflows
+- Third-party validation of documents
+- Incident response
 
+Do not use this tool for any unethical activity.
 
-## What next?
+## What It Detects
 
-Right now, `x-ray` works pretty well and we are using it to analyze documents
-in our collections. It could be better though. Bad redactions take many forms.
-See the issues tab for other examples we don't yet support. We'd love your
-help solving some of tougher cases.
+`x-ray` focuses on overlay-style redaction failures where text remains embedded
+in the PDF content stream and can still be extracted.
 
+High-level pipeline:
+
+1. Parse page drawings and detect candidate opaque rectangles.
+2. Identify characters occluded by those rectangles.
+3. Group characters by rectangle and apply text-based filters.
+4. Render each region and keep only uniform-color overlays likely to be
+   ineffective redactions.
+
+Detailed model and caveats: [`docs/detection-model.md`](docs/detection-model.md)
+
+## Scope and Non-Goals
+
+In scope:
+
+- PDF vector/overlay redaction failures where hidden text remains extractable
+- Batch triage for likely redaction mistakes
+
+Out of scope:
+
+- OCR-only leaks in image-only documents
+- Exhaustive forensic PDF reverse engineering for every possible leak pattern
+- Policy decisions about the "sensitivity" of a document, and if it should be ethically published
 
 ## Installation
 
-With uv, do:
+Using `uv`:
 
 ```text
 uv add x-ray
 ```
 
-With pip, that'd be:
+Using `pip`:
+
 ```text
 pip install x-ray
 ```
 
-## Usage
+## Quickstart (Offline, Local Files)
 
-`uvx` lets you run this without even installing it. For example, here's an amicus brief we filed that doesn't have any bad redactions, so it returns an empty dict:
-
-```
-uvx --from x-ray xray https://storage.courtlistener.com/recap/gov.uscourts.ca3.125346/gov.uscourts.ca3.125346.45.0.pdf
-{}
-```
-
-Once you *do* install x-ray, you can easily use it on the command line. Once installed, just:
+Run against a known test file:
 
 ```bash
-% xray path/to/your/file.pdf
+xray tests/assets/rectangles_yes.pdf
+```
+
+Run against a file with no expected findings:
+
+```bash
+xray tests/assets/no_bad_redactions.2.1.pdf
+```
+
+Use Python API with a local path:
+
+```python
+from pathlib import Path
+import xray
+
+findings = xray.inspect(Path("tests/assets/rectangles_yes.pdf"))
+print(findings)
+```
+
+Use Python API with file bytes:
+
+```python
+import xray
+
+with open("tests/assets/rectangles_yes.pdf", "rb") as f:
+    findings = xray.inspect(f.read())
+print(findings)
+```
+
+Note: `xray.inspect()` supports `https://` strings, but internal workflows
+should prefer local-file processing for predictable handling and auditing.
+
+## Output Format
+
+Output is JSON from CLI and a Python object from API. The top-level structure:
+
+- Dictionary keyed by page number (`int`)
+- Each page maps to a list of findings
+- Each finding contains:
+  - `bbox`: `(x0, y0, x1, y1)` coordinates for the candidate redaction area
+  - `text`: underlying recovered text occluded by that rectangle
+
+Example shape:
+
+```json
 {
   "1": [
     {
-      "bbox": [
-        58.550079345703125,
-        72.19873046875,
-        75.65007781982422,
-        739.3987426757812
-      ],
-      "text": "The Ring travels by way of Cirith Ungol"
+      "bbox": [58.55, 72.19, 75.65, 739.39],
+      "text": "Example recovered text"
     }
   ]
 }
 ```
 
-Or if you have the file on a server somewhere, give it a URL. If it starts with `https://`, it will be interpreted as a PDF to download. Here's congressional testimony our director made (it doesn't have any bad redactions):
+Treat recovered `text` as potentially sensitive data.
+
+## Known Limitations
+
+No automated detector is perfect. `x-ray` can produce false positives and false
+negatives depending on PDF complexity.
+
+Notable limitations reflected in tests:
+
+- Complex overlapping text/layering scenarios can evade detection
+- Some non-standard drawing behaviors require conservative heuristics
+- Image-heavy documents and OCR edge cases are not comprehensively handled
+
+For details, see [`docs/detection-model.md`](docs/detection-model.md).
+
+## Integration Patterns
+
+Batch and pipeline examples (local files, JSON post-processing):
+[`docs/integration.md`](docs/integration.md)
+
+## Development
+
+Set up development dependencies:
 
 ```bash
-% xray https://free.law/pdf/congressional-testimony-michael-lissner-free-law-project-hearing-on-ethics-and-transparency-2021-10-26.pdf
-{}
+uv sync
 ```
 
-A fun trick you can do is to make a file with one URL per line, call it `urls.txt`. Then you can run this to check each URL:
+Run unit tests:
 
 ```bash
-xargs -n 1 xray  < urls.txt
+python -m unittest -v
 ```
 
-However you run `xray` on the command line, you'll get JSON as output. When you have that, you can use it with tools like [`jq`][jq]. The format is as follows:
+Run tox matrix locally:
 
- - It's a dict.
- - The keys are page numbers.
- - Each page number maps to a list of dicts.
- - Each of those dicts maps to two keys.
- - The first key is `bbox`. This is a four-tuple that indicates the x,y positions of the upper left corner and then lower right corners of the bad redaction.
- - The second key is `text`. This is the text under the bad rectangle.
-
-Simple enough.
-
-You can also use it as a Python module, if you prefer the long-form:
-
-```
-% python -m xray some-file.pdf
+```bash
+tox
 ```
 
-But that's not as easy to remember.
+Run pre-commit checks:
 
-If you want a bit more, you can, of course, use `xray` in Python:
-
-```python
-from pprint import pprint
-import xray
-bad_redactions = xray.inspect("some/path/to/your/file.pdf")  # Pathlib works too
-pprint(bad_redactions)
-{1: [{'bbox': (58.550079345703125,
-               72.19873046875,
-               75.65007781982422,
-               739.3987426757812),
-      'text': 'Aragorn is the one true king.'}]}
+```bash
+pre-commit run --all-files
 ```
 
-The output is the same as above, except it's a Python object, not a JSON object.
+Run type checks:
 
-If you already have the file contents as a `bytes` object, that'll work too:
-
-```python
-some_bytes = requests.get("https://lotr-secrets.com/some-doc.pdf").content
-bad_redactions = xray.inspect(some_bytes)
+```bash
+mypy .
 ```
 
-Note that because the `inspect` method uses the same signature no matter what,
-the type of the object you give it is essential:
+## Issue Reporting
 
-Input | `xray`'s Assumption
--- | --
-`str` or Pathlib `Path` | local file
-`str` that starts with `https://` | URL to download
-`bytes` | PDF in memory
+Use GitHub issues in this repository for:
 
-This means that if you provide the filename on disk as a bytes object instead
-of a `str`, it's not going to work. This will fail:
-
-```python
-xray.inspect(b"some-file-path.pdf")
-```
-
-That's pretty much it. There are no configuration files or other variables to
-learn. You give it a file name. If there is a bad redaction in it, you'll soon
-find out.
-
-
-## How it works
-
-Under the covers, `xray` uses the high-performant [PyMuPDF project][mu] to parse PDFs. It has been a wonderful project to work with.
-
-You can read the source to see how it works, but the general idea is to:
-
-1. Find rectangles in a PDF.
-
-2. Find letters in the same location
-
-3. Render the rectangle as an image
-
-4. Inspect the rectangle to see if it's all one color. If it is, then that's a
-   bad redaction. If not, then we assume you can see a mix of text and
-   drawings, indicating a redaction that's OK.
-
-The PDF format is a big and complicated one, so it's difficult to do all this perfectly. We do our best, but there's always more to do to make it better. [Donations][d] and sponsored work help.
-
-[d]: https://free.law/donate/
-
-
-## Contributions
-
-Please see the issues list on Github for things we need, or start a conversation if you have questions. Before you do your first contribution, we'll need a signed contributor license agreement. See the template in the repo.
-
-
-## Deployment
-
-Releases happen automatically via Github Actions. To trigger an automated build:
-
-0. Update CHANGES.md
-
-1. Update the version in pyproject.toml
-
-2. Tag the commit with something like "v0.0.0".
-
-
-If you wish to create a new version manually, the process is:
-
-1. Update version info in `pyproject.toml`
-
-2. Configure your Pypi credentials [with Poetry][creds]
-
-3. Build and publish the version:
-
-```sh
-poetry publish --build
-```
-
-
+- Detection quality issues
+- False positive/false negative examples
+- Security concerns in parser or dependency behavior
+- Enhancement requests for detection workflows
 
 ## License
 
-This repository is available under the permissive BSD license, making it easy and safe to incorporate in your own libraries.
-
-Pull and feature requests welcome. Online editing in GitHub is possible (and easy!).
-
-[jq]: https://stedolan.github.io/jq/
-[mu]: https://pymupdf.readthedocs.io/
-[asc]: https://en.wikipedia.org/wiki/Ascender_(typography)
-[creds]: https://python-poetry.org/docs/repositories/#configuring-credentials
+This repository is licensed under BSD-2-Clause. See [`LICENSE`](LICENSE).
